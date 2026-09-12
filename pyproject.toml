@@ -1,0 +1,28 @@
+[project]
+name = "memo"
+version = "0.1.0"
+description = "TP-7 voice memos, transcribed locally into a daily Markdown journal"
+readme = "README.md"
+authors = [
+    { name = "Dima", email = "socket.h@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.1",
+    "mlx-whisper>=0.4.3",
+]
+
+[project.scripts]
+memo = "memo.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
