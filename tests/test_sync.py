@@ -223,10 +223,9 @@ def test_auto_stays_alive_until_the_recorder_is_unplugged(synced, monkeypatch):
             [audio],  # sync's own presence check
             [_device("mtp", "0x1")],  # session just closed, flip still pending
             [audio],  # settled in audio mode: this is the identity to watch
-            [],  # a one-poll blip is a re-enumeration, not an unplug
+            *([[]] * 2),  # a short absence is a re-enumeration, not an unplug
             [audio],
-            [],
-            [],  # two empty polls in a row: unplugged
+            *([[]] * 6),  # absent for six polls: unplugged
             [audio],  # never reached
         ],
     )

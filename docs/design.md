@@ -85,7 +85,10 @@ launchd treats an IOKit match as a level, not an edge: while a matching device
 is attached it re-spawns the job every `ThrottleInterval` seconds, and
 `IOMatchLaunchStream` makes no difference (observed on macOS 15.7). So the
 `--auto` process does its sync and then stays alive, polling `tp7 devices`
-every 5 s, until the recorder is unplugged. launchd therefore sees exactly one
+every 5 s, until the recorder is unplugged. Two signals mean unplug: the
+device absent for 30 s (closing a session takes it off USB for ~8 s on
+firmware 2.5.7, so shorter gaps are re-enumeration), or a new IORegistry id
+while in audio mode, which is how a quick replug looks. launchd therefore sees exactly one
 run per plug-in, and the MTP session's own re-enumeration (0x0019 → 0x8019 on
 close) never starts a second one. A `.memo/lock` (flock) guards against a
 manual `memo sync` overlapping the automatic one: two MTP sessions on one

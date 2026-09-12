@@ -234,6 +234,9 @@ def _sync_once(*, auto: bool, no_pull: bool, max_minutes: float | None) -> SyncR
 
 
 UNPLUG_POLL_SECONDS = 5.0
+#: Closing an MTP session takes the recorder off USB for ~8 s (measured on
+#: firmware 2.5.7); a real unplug has to outlast that by a wide margin.
+UNPLUG_ABSENT_POLLS = 6
 
 
 def _sync_auto(*, no_pull: bool, max_minutes: float | None) -> None:
@@ -271,10 +274,11 @@ def _wait_for_unplug(cfg: Config | None) -> None:
     """Block until the recorder is physically unplugged.
 
     Absence alone is not enough: closing the MTP session re-enumerates the
-    device (it vanishes for a second or two), and a quick replug can fit
-    inside one poll interval. So once the recorder has settled into its
-    audio personality, remember its IORegistry id; a different id in audio
-    mode can only come from a replug, and so can two consecutive empty polls.
+    device (it vanishes for ~8 s), and a quick replug can fit inside one
+    poll interval. So once the recorder has settled into its audio
+    personality, remember its IORegistry id: a different id in audio mode
+    can only come from a replug. Absence counts only once it has lasted
+    longer than any re-enumeration.
     """
     if cfg is None:
         return
@@ -287,7 +291,7 @@ def _wait_for_unplug(cfg: Config | None) -> None:
             return
         if device is None:
             absent += 1
-            if absent >= 2:
+            if absent >= UNPLUG_ABSENT_POLLS:
                 return
         else:
             absent = 0
