@@ -12,10 +12,24 @@ for transcription on Apple silicon.
 ## Install
 
 ```sh
-brew install totocaster/tap/tp7 ffmpeg uv
+brew install ffmpeg uv rustup && rustup-init -y          # skip what you already have
+cargo install --git https://github.com/EDmitry/tp7 --locked
 uv tool install git+https://github.com/EDmitry/memo
 memo install      # optional: sync automatically whenever the TP-7 is plugged in
 ```
+
+`tp7` comes from the fork until upstream ships firmware 2.5.x detection and
+`pull --max-size`; the Homebrew tap (`totocaster/tap/tp7`) does not have them yet.
+
+To update later:
+
+```sh
+uv tool upgrade memo
+cargo install --git https://github.com/EDmitry/tp7 --locked --force
+```
+
+A parked automatic run keeps the old code until the recorder is unplugged;
+`memo install` only needs re-running if the plist itself changed.
 
 For development, `uv tool install --editable .` from a checkout.
 
