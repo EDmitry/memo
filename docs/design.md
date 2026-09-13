@@ -55,9 +55,7 @@ Journal entry:
 ```markdown
 ## 17:03 · 0:42
 
-Remember to refactor the transcription pipeline tomorrow. ...
-
-^memo-2026-09-12-170312-000
+Remember to refactor the transcription pipeline tomorrow. ... ^memo-2026-09-12-170312-000
 ```
 
 The trailing block id is the memo's identity in the journal: the audio stem

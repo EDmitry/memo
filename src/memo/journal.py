@@ -34,7 +34,10 @@ from .store import Store, Transcript
 ENTRY_HEADING_RE = re.compile(r"^##[ \t]+(\d{1,2}):(\d{2})[ \t]*·[ \t]*(\d+):(\d{2})[ \t]*$", re.MULTILINE)
 
 #: The block id line closing an entry: ``^memo-2026-09-12-170312-000``.
-BLOCK_ID_RE = re.compile(r"^\^([A-Za-z0-9-]+)$")
+#: A block id either trails the last text line (``text ^memo-…``, which is
+#: how Obsidian attaches it to a paragraph) or, in entries written before
+#: that fix, sits on a line of its own.
+BLOCK_ID_RE = re.compile(r"^(?:(?P<text>.*?)[ \t]+)?\^(?P<id>[A-Za-z0-9-]+)$")
 
 #: ``{{date}}``, ``{{time}}``, ``{{title}}`` in a journal template.
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z]+)\s*\}\}")
@@ -76,15 +79,12 @@ ELSEWHERE_JOURNALS = """\
 def entry(transcript: Transcript) -> str:
     """One journal section, ending in a single newline.
 
-    The trailing ``^memo-…`` block id is invisible in Obsidian's reading view;
-    it is what lets another machine tell this memo from one of its own.
+    The ``^memo-…`` block id at the end of the text is invisible in Obsidian's
+    reading view (it must sit on the paragraph's last line to count as a block
+    id); it is what lets another machine tell this memo from one of its own.
     """
     text = " ".join(transcript.text.split()) or "_(no speech detected)_"
-    return (
-        f"## {transcript.time} · {transcript.duration}\n\n"
-        f"{text}\n\n"
-        f"^{block_id(transcript.name)}\n"
-    )
+    return f"## {transcript.time} · {transcript.duration}\n\n{text} ^{block_id(transcript.name)}\n"
 
 
 def render_entries(transcripts: list[Transcript]) -> str:
@@ -247,7 +247,9 @@ def parse_day(text: str, date: str) -> list[JournalEntry]:
         elif heading is None:
             continue
         elif found := BLOCK_ID_RE.match(line):
-            close(found.group(1))
+            if found.group("text"):
+                lines.append(found.group("text"))
+            close(found.group("id"))
         else:
             lines.append(line)
     close(None)

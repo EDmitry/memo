@@ -355,6 +355,6 @@ def test_no_pull_writes_into_the_journal_dir(synced, shared, remote, monkeypatch
     assert not (synced.root / "2026-09-12.md").exists()
     assert (shared / "2026-09-12.md").read_text(encoding="utf-8") == (
         "# 2026-09-12\n\n## 17:03 · 0:42\n\n"
-        "transcript of 2026-09-12_170312_000\n\n^memo-2026-09-12-170312-000\n"
+        "transcript of 2026-09-12_170312_000 ^memo-2026-09-12-170312-000\n"
     )
     assert synced.claude_md.exists()  # CLAUDE.md never leaves the memo dir
