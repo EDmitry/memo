@@ -240,3 +240,31 @@ def test_auto_exits_on_a_quick_replug(synced, monkeypatch):
         [[before], [before], [before], [after], [after]],  # never reached
     )
     assert next(polls) == [after]
+
+
+def test_auto_waits_for_a_powered_off_recorder_to_be_turned_on(synced, monkeypatch):
+    off = _device("mass-storage", "0x1")
+    on = _device("audio-midi", "0x2")
+    polls = iter([[off], [off], [on]])
+    monkeypatch.setattr("memo.cli.list_devices", lambda tp7: next(polls))
+    monkeypatch.setattr("memo.cli.POWER_ON_POLL_SECONDS", 0)
+    notices: list[str] = []
+    monkeypatch.setattr("memo.cli.notify", notices.append)
+
+    result = run("--auto")
+    assert result.exit_code == 0, result.output
+    assert notices[0] == "TP-7 is powered off; turn it on to sync"
+    assert FakeTranscriber.calls  # synced once it came on
+    assert "waiting (TP-7 is powered off)" in synced.sync_log.read_text()
+
+
+def test_manual_sync_gives_up_on_a_powered_off_recorder(synced, monkeypatch):
+    monkeypatch.setattr("memo.cli.list_devices", lambda tp7: [_device("mass-storage", "0x1")])
+    monkeypatch.setattr("memo.cli.POWER_ON_POLL_SECONDS", 0)
+    monkeypatch.setattr("memo.cli.POWER_ON_MANUAL_TIMEOUT", 0)
+
+    result = run()
+    assert result.exit_code == 1
+    assert "TP-7 is powered off" in result.output
+    assert "turn it on" in result.output
+    assert FakeTranscriber.calls == []

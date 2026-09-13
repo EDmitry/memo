@@ -206,6 +206,11 @@ def _sync_once(*, auto: bool, no_pull: bool, max_minutes: float | None) -> SyncR
     limit = cfg.max_minutes if max_minutes is None else max_minutes
     store.ensure_dirs()
 
+    if not no_pull and not _wait_for_power_on(cfg, store, auto=auto):
+        if not auto:
+            click.echo("no TP-7 connected")
+        return None
+
     with _sync_lock(store) as acquired:
         if not acquired:
             # Two syncs on one device time each other out: launchd fires on
@@ -214,11 +219,6 @@ def _sync_once(*, auto: bool, no_pull: bool, max_minutes: float | None) -> SyncR
                 log_line(store, "skipped (another sync is running)")
                 return None
             raise DeviceError("another memo sync is already running")
-
-        if not no_pull and not _device_present(cfg):
-            if not auto:
-                click.echo("no TP-7 connected")
-            return None
 
         result = run_sync(cfg, store, do_pull=not no_pull, max_minutes=limit, quiet=auto)
         store.last_sync.touch()  # informational only: `memo status` shows it
@@ -234,6 +234,9 @@ def _sync_once(*, auto: bool, no_pull: bool, max_minutes: float | None) -> SyncR
 
 
 UNPLUG_POLL_SECONDS = 5.0
+POWER_ON_POLL_SECONDS = 2.0
+#: How long a manual `memo sync` waits for a powered-off recorder to be turned on.
+POWER_ON_MANUAL_TIMEOUT = 60.0
 #: Closing an MTP session takes the recorder off USB for ~8 s (measured on
 #: firmware 2.5.7); a real unplug has to outlast that by a wide margin.
 UNPLUG_ABSENT_POLLS = 6
@@ -268,6 +271,40 @@ def _sync_auto(*, no_pull: bool, max_minutes: float | None) -> None:
 
     _report_auto(result, store)
     _wait_for_unplug(cfg)
+
+
+def _wait_for_power_on(cfg: Config, store: Store, *, auto: bool) -> bool:
+    """True once a TP-7 is present and powered on; False if none is connected.
+
+    A recorder plugged in while switched off enumerates as a bare USB
+    mass-storage device with no MIDI, so the MTP switch cannot be sent and
+    the state never changes on its own (measured on firmware 2.5.7). Turning
+    it on re-enumerates it in audio mode, so wait for that: forever in --auto
+    mode (the run lives until unplug anyway), briefly for a manual sync.
+    """
+    told = False
+    deadline = None if auto else time.monotonic() + POWER_ON_MANUAL_TIMEOUT
+    absent = 0
+    while True:
+        device = next(iter(list_devices(tp7=cfg.tp7)), None)
+        if device is None:
+            absent += 1
+            if not told or absent >= UNPLUG_ABSENT_POLLS:
+                return False
+        elif not device.powered_off:
+            return True
+        else:
+            absent = 0
+            if not told:
+                told = True
+                if auto:
+                    log_line(store, "waiting (TP-7 is powered off)")
+                    notify("TP-7 is powered off; turn it on to sync")
+                else:
+                    warn("TP-7 is powered off; waiting for it to be turned on…")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise DeviceError("TP-7 is still powered off; turn it on and run `memo sync` again")
+        time.sleep(POWER_ON_POLL_SECONDS)
 
 
 def _wait_for_unplug(cfg: Config | None) -> None:
@@ -334,10 +371,6 @@ def _sync_lock(store: Store):
             yield True
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
-
-
-def _device_present(cfg: Config) -> bool:
-    return bool(list_devices(tp7=cfg.tp7))
 
 
 # -------------------------------------------------------------------- show

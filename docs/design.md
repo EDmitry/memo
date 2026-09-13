@@ -100,6 +100,14 @@ sync" timestamp `memo status` prints.
 Every completed run notifies, including one that found nothing ("no new
 memos"), so a plug-in never looks like it did nothing.
 
+A recorder plugged in while switched off enumerates as a bare USB
+mass-storage device (product 0x0019, one bulk-only interface, no MIDI, the
+kernel driver owns it), and stays that way until it is powered on, which
+re-enumerates it in audio mode. The launchd match fires on 0x0019, so the
+`--auto` run notifies "TP-7 is powered off; turn it on to sync" once and waits
+for power-on before syncing. A manual `memo sync` waits 60 s, then gives up
+with the same advice.
+
 The agent's PATH must include `tp7`, `ffmpeg`, and `uv`/`memo`; `memo install`
 bakes the resolved absolute paths into the plist.
 

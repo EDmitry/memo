@@ -69,6 +69,9 @@ memo status      # config, model, agent state, last sync
 memo uninstall
 ```
 
+If you plug the recorder in while it is switched off, you get a notification
+asking you to turn it on; the sync runs as soon as you do.
+
 `memo install` writes `~/Library/LaunchAgents/local.memo.sync.plist`, which asks
 launchd to run `memo sync --auto` whenever the TP-7 appears on USB. A macOS
 notification reports how many memos arrived — or says "no new memos" when

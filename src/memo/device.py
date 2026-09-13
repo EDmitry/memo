@@ -34,6 +34,11 @@ class Device:
     def audio_mode(self) -> bool:
         return self.mode == "audio-midi"
 
+    @property
+    def powered_off(self) -> bool:
+        """A TP-7 plugged in while off exposes only a mass-storage interface."""
+        return self.mode == "mass-storage"
+
     @classmethod
     def from_dict(cls, data: dict) -> "Device":
         return cls(
