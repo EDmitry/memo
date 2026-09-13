@@ -592,6 +592,9 @@ def status() -> None:
     click.echo(f"journal dir {store.journal_dir}{'' if store.journal_dir.is_dir() else '  (missing)'}")
     if (vault := obsidian.vault_root(store.journal_dir)) is not None:
         click.echo(f"vault       {vault}")
+    if store.journal_template is not None:
+        missing = "" if store.journal_template.is_file() else "  (missing)"
+        click.echo(f"template    {store.journal_template}{missing}")
     click.echo(f"model       {cfg.model}")
     click.echo(f"language    {cfg.language or 'auto'}")
     click.echo(f"remote dirs {', '.join(cfg.remote_dirs)}")

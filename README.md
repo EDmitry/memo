@@ -83,12 +83,13 @@ vault notes. Only the `YYYY-MM-DD.md` files move; audio, transcripts and
 
 ```toml
 journal_dir = "~/Vault/Memos"
-journal_template = "~/.config/memo/journal.md"
+journal_template = "~/Vault/Templates/MEMO DAY.md"
 ```
 
 `journal_template` is the head memo writes when it creates a day's file —
 `{{date}}`, `{{time}}` and `{{title}}` are filled in, anything else is left
-alone:
+alone. Those are the placeholders of Obsidian's core Templates plugin, so the
+file can live in your vault's templates folder and sync with it:
 
 ```
 ---
