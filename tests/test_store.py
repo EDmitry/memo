@@ -67,3 +67,36 @@ def test_ignores_unreadable_transcripts(store):
     store.transcript_path("broken").write_text("{not json", encoding="utf-8")
     assert store.read_transcript("broken") is None
     assert store.transcripts() == []
+
+
+def test_journal_dir_defaults_to_the_memo_dir(store):
+    assert store.journal_dir == store.root
+    assert store.journal_path("2026-09-12") == store.root / "2026-09-12.md"
+
+
+def test_journal_dir_comes_from_the_config_and_the_env(isolated_env, monkeypatch):
+    from memo.config import load as load_config
+
+    monkeypatch.setenv("MEMO_JOURNAL_DIR", str(isolated_env / "vault" / "Memos"))
+    cfg = load_config()
+    resolved = Store.from_config(cfg)
+    assert resolved.root == isolated_env / "memos"
+    assert resolved.journal_dir == isolated_env / "vault" / "Memos"
+    assert resolved.journal_path("2026-09-12") == isolated_env / "vault" / "Memos" / "2026-09-12.md"
+    # Audio, transcripts and CLAUDE.md never leave the memo dir.
+    assert resolved.audio_dir == resolved.root / "audio"
+    assert resolved.claude_md == resolved.root / "CLAUDE.md"
+
+
+def test_journal_files_are_listed_from_the_journal_dir(isolated_env, monkeypatch):
+    from memo.config import load as load_config
+
+    journals = isolated_env / "vault" / "Memos"
+    journals.mkdir(parents=True)
+    (journals / "2026-09-12.md").write_text("# 2026-09-12\n", encoding="utf-8")
+    (journals / "not-a-journal.md").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("MEMO_JOURNAL_DIR", str(journals))
+
+    assert [path.name for path in Store.from_config(load_config()).journal_files()] == [
+        "2026-09-12.md"
+    ]

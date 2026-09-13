@@ -24,6 +24,10 @@ class ConfigError(Exception):
 @dataclass(frozen=True)
 class Config:
     dir: Path
+    #: Where the rendered daily journals go; ``None`` means ``dir`` itself.
+    journal_dir: Path | None = None
+    #: Head of a journal file memo creates; ``None`` means a plain ``# <date>``.
+    journal_template: Path | None = None
     model: str = DEFAULT_MODEL
     language: str = ""
     remote_dirs: tuple[str, ...] = DEFAULT_REMOTE_DIRS
@@ -63,6 +67,8 @@ def load(path: Path | None = None) -> Config:
 def _from_mapping(data: dict[str, object], source: Path | None) -> Config:
     return Config(
         dir=_path(data.get("dir", DEFAULT_DIR), "dir"),
+        journal_dir=_opt_path(data.get("journal_dir"), "journal_dir"),
+        journal_template=_opt_path(data.get("journal_template"), "journal_template"),
         model=_str(data.get("model", DEFAULT_MODEL), "model"),
         language=_str(data.get("language", ""), "language"),
         remote_dirs=_str_tuple(data.get("remote_dirs", DEFAULT_REMOTE_DIRS), "remote_dirs"),
@@ -77,6 +83,10 @@ def _apply_env(cfg: Config, env: dict[str, str] | os._Environ[str]) -> Config:
     changes: dict[str, object] = {}
     if value := env.get("MEMO_DIR"):
         changes["dir"] = _path(value, "MEMO_DIR")
+    if value := env.get("MEMO_JOURNAL_DIR"):
+        changes["journal_dir"] = _path(value, "MEMO_JOURNAL_DIR")
+    if value := env.get("MEMO_JOURNAL_TEMPLATE"):
+        changes["journal_template"] = _path(value, "MEMO_JOURNAL_TEMPLATE")
     if value := env.get("MEMO_MODEL"):
         changes["model"] = value
     if (value := env.get("MEMO_LANGUAGE")) is not None:
@@ -100,6 +110,10 @@ def _str(value: object, key: str) -> str:
 
 def _path(value: object, key: str) -> Path:
     return Path(_str(value, key)).expanduser()
+
+
+def _opt_path(value: object, key: str) -> Path | None:
+    return None if value is None else _path(value, key)
 
 
 def _str_tuple(value: object, key: str) -> tuple[str, ...]:

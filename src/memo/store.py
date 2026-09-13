@@ -13,6 +13,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from .config import Config
+from .obsidian import block_id
+
 AUDIO_SUFFIXES = (".wav", ".WAV")
 
 #: TP-7 recordings are named ``YYYY-MM-DD_HHMMSS_NNN.wav``.
@@ -31,6 +34,8 @@ class Transcript:
     text: str
     segments: list[dict] = field(default_factory=list)
     transcribed_at: datetime = field(default_factory=datetime.now)
+    #: True when reconstructed from a shared journal entry another machine wrote.
+    adopted: bool = False
 
     @property
     def date(self) -> str:
@@ -46,16 +51,19 @@ class Transcript:
         return f"{total // 60}:{total % 60:02d}"
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "name": self.name,
             "recorded_at": self.recorded_at.isoformat(timespec="seconds"),
             "duration_s": round(self.duration_s, 3),
-            "language": self.language,
-            "model": self.model,
+            "language": self.language or None,
+            "model": self.model or None,
             "text": self.text,
             "segments": self.segments,
             "transcribed_at": self.transcribed_at.isoformat(timespec="seconds"),
         }
+        if self.adopted:
+            data["adopted"] = True
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "Transcript":
@@ -68,14 +76,31 @@ class Transcript:
             text=str(data.get("text") or "").strip(),
             segments=list(data.get("segments") or []),
             transcribed_at=_parse_dt(data.get("transcribed_at")),
+            adopted=bool(data.get("adopted")),
         )
 
 
 class Store:
-    """Paths and lookups for one memo directory."""
+    """Paths and lookups for one memo directory.
 
-    def __init__(self, root: Path) -> None:
+    The durable data (audio, transcripts, sync state, ``CLAUDE.md``) always
+    lives under ``root``. Only the rendered journals can be sent elsewhere,
+    via ``journal_dir`` — typically a folder inside an Obsidian vault.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        journal_dir: Path | None = None,
+        journal_template: Path | None = None,
+    ) -> None:
         self.root = Path(root).expanduser()
+        self.journal_dir = Path(journal_dir).expanduser() if journal_dir else self.root
+        self.journal_template = journal_template
+
+    @classmethod
+    def from_config(cls, cfg: Config) -> "Store":
+        return cls(cfg.dir, cfg.journal_dir, cfg.journal_template)
 
     # -- layout ---------------------------------------------------------
     @property
@@ -123,10 +148,22 @@ class Store:
         return sorted(files, key=lambda path: (recorded_at_for(path), path.name))
 
     def untranscribed(self) -> list[Path]:
-        """Audio files that have no transcript yet, oldest first."""
-        return [path for path in self.audio_files() if not self.transcript_path(path.stem).exists()]
+        """Audio files that have no transcript yet, oldest first.
+
+        Matched by block id rather than by file name: a transcript adopted
+        from the shared journal before this machine had the recording is
+        named after the block id, and must still count as transcribed.
+        """
+        known = self.transcript_ids()
+        return [path for path in self.audio_files() if block_id(path.stem) not in known]
 
     # -- transcripts ------------------------------------------------------
+    def transcript_ids(self) -> set[str]:
+        """The block id of every memo this machine has a transcript for."""
+        if not self.transcripts_dir.is_dir():
+            return set()
+        return {block_id(path.stem) for path in self.transcripts_dir.glob("*.json")}
+
     def transcript_path(self, stem: str) -> Path:
         return self.transcripts_dir / f"{stem}.json"
 
@@ -156,15 +193,17 @@ class Store:
         items = [item for item in found if item is not None]
         return sorted(items, key=lambda item: (item.recorded_at, item.name))
 
+    # -- journals ---------------------------------------------------------
     def journal_path(self, date: str) -> Path:
-        return self.root / f"{date}.md"
+        """The Markdown file for one ``YYYY-MM-DD``, wherever journals live."""
+        return self.journal_dir / f"{date}.md"
 
     def journal_files(self) -> list[Path]:
-        if not self.root.is_dir():
+        if not self.journal_dir.is_dir():
             return []
         return sorted(
             path
-            for path in self.root.glob("*.md")
+            for path in self.journal_dir.glob("*.md")
             if re.fullmatch(r"\d{4}-\d{2}-\d{2}", path.stem)
         )
 

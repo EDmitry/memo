@@ -18,7 +18,14 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MEMO_CONFIG", str(tmp_path / "no-such-config.toml"))
     monkeypatch.setenv("MEMO_DIR", str(tmp_path / "memos"))
     monkeypatch.setenv("MEMO_TP7", str(FAKE_TP7))
-    for name in ("MEMO_MODEL", "MEMO_LANGUAGE", "MEMO_REMOTE_DIRS", "MEMO_MAX_MINUTES"):
+    for name in (
+        "MEMO_MODEL",
+        "MEMO_LANGUAGE",
+        "MEMO_REMOTE_DIRS",
+        "MEMO_MAX_MINUTES",
+        "MEMO_JOURNAL_DIR",
+        "MEMO_JOURNAL_TEMPLATE",
+    ):
         monkeypatch.delenv(name, raising=False)
     return tmp_path
 
@@ -38,6 +45,16 @@ def remote(isolated_env) -> Path:
     write_wav(directory / "2026-09-12_170312_000.wav", seconds=1)
     write_wav(directory / "2026-09-12_174501_001.wav", seconds=2)
     return directory
+
+
+@pytest.fixture
+def vault(isolated_env, monkeypatch) -> Path:
+    """An Obsidian vault whose `Memos` folder is where journals are written."""
+    root = isolated_env / "vault"
+    (root / ".obsidian").mkdir(parents=True)
+    (root / "Memos").mkdir()
+    monkeypatch.setenv("MEMO_JOURNAL_DIR", str(root / "Memos"))
+    return root
 
 
 def write_wav(path: Path, seconds: int = 1, rate: int = 8000) -> Path:

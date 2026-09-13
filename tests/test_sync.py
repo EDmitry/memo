@@ -5,14 +5,17 @@ Nothing here needs the model or the device.
 
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from memo.cli import _wait_for_unplug as real_wait_for_unplug
 from memo.cli import cli
+from memo.config import load as load_config
 from memo.store import Store, Transcript, recorded_at_for
 
 
@@ -268,3 +271,90 @@ def test_manual_sync_gives_up_on_a_powered_off_recorder(synced, monkeypatch):
     assert "TP-7 is powered off" in result.output
     assert "turn it on" in result.output
     assert FakeTranscriber.calls == []
+
+
+# ------------------------------------------- two machines, one shared vault
+
+
+@pytest.fixture
+def shared(isolated_env, monkeypatch) -> Path:
+    """A journal folder inside an Obsidian vault, shared by both machines."""
+    journals = isolated_env / "vault" / "Memos"
+    (isolated_env / "vault" / ".obsidian").mkdir(parents=True)
+    journals.mkdir()
+    monkeypatch.setenv("MEMO_JOURNAL_DIR", str(journals))
+    return journals
+
+
+def machine(isolated_env, monkeypatch, name: str) -> Store:
+    """Point the CLI at one machine's own memo dir; the journal dir is shared."""
+    root = isolated_env / name
+    monkeypatch.setenv("MEMO_DIR", str(root))
+    return Store.from_config(load_config())
+
+
+def test_sync_into_a_shared_journal_never_duplicates_a_memo(synced, shared, isolated_env, monkeypatch):
+    day = shared / "2026-09-12.md"
+
+    # Machine A pulls both memos from the recorder and transcribes them.
+    first = machine(isolated_env, monkeypatch, "machine-a")
+    assert run().exit_code == 0
+    assert len(FakeTranscriber.calls) == 2
+    after_a = day.read_text(encoding="utf-8")
+
+    # Machine B has its own dir and the same recorder, but shares the journal.
+    second = machine(isolated_env, monkeypatch, "machine-b")
+    FakeTranscriber.calls = []
+    result = run()
+    assert result.exit_code == 0, result.output
+    assert FakeTranscriber.calls == []  # nothing to transcribe: the journal knew
+    assert "adopted 2026-09-12_170312_000 from journal" in result.output
+    assert day.read_text(encoding="utf-8") == after_a
+    assert {item.name for item in second.transcripts()} == {
+        "2026-09-12_170312_000",
+        "2026-09-12_174501_001",
+    }
+    assert all(item.adopted for item in second.transcripts())
+    assert len(CliRunner().invoke(cli, ["ls"]).output.strip().splitlines()) == 2
+
+    # B records a new memo and syncs it.
+    from conftest import write_wav
+
+    write_wav(Path(os.environ["FAKE_TP7_SOURCE"]) / "2026-09-12_200000_002.wav")
+    FakeTranscriber.calls = []
+    assert run().exit_code == 0
+    assert FakeTranscriber.calls == ["2026-09-12_200000_002"]
+
+    # A syncs again: it adopts B's memo instead of transcribing it twice.
+    machine(isolated_env, monkeypatch, "machine-a")
+    FakeTranscriber.calls = []
+    result = run()
+    assert result.exit_code == 0, result.output
+    assert FakeTranscriber.calls == []
+    assert "adopted 2026-09-12_200000_002 from journal" in result.output
+
+    content = day.read_text(encoding="utf-8")
+    assert content.count("^memo-") == 3
+    assert content.count("## 17:03 · 0:42") == 1
+    assert len(first.transcripts()) == 3
+
+    # And a rebuild on A changes nothing.
+    assert CliRunner().invoke(cli, ["rebuild"]).exit_code == 0
+    assert day.read_text(encoding="utf-8") == content
+
+
+def test_no_pull_writes_into_the_journal_dir(synced, shared, remote, monkeypatch):
+    monkeypatch.setenv("FAKE_TP7_DEVICES", "0")
+    synced.ensure_dirs()
+    (synced.audio_dir / "2026-09-12_170312_000.wav").write_bytes(
+        (remote / "2026-09-12_170312_000.wav").read_bytes()
+    )
+
+    result = run("--no-pull")
+    assert result.exit_code == 0, result.output
+    assert not (synced.root / "2026-09-12.md").exists()
+    assert (shared / "2026-09-12.md").read_text(encoding="utf-8") == (
+        "# 2026-09-12\n\n## 17:03 · 0:42\n\n"
+        "transcript of 2026-09-12_170312_000\n\n^memo-2026-09-12-170312-000\n"
+    )
+    assert synced.claude_md.exists()  # CLAUDE.md never leaves the memo dir

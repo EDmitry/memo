@@ -19,7 +19,7 @@ from pathlib import Path
 
 import click
 
-from . import journal, launchd
+from . import journal, launchd, obsidian
 from .config import Config, ConfigError, load as load_config
 from .device import DeviceError, devices as list_devices, pull as pull_dir
 from .store import Store, Transcript
@@ -50,7 +50,7 @@ def handle_errors(command):
 
 def context() -> tuple[Config, Store]:
     cfg = load_config()
-    return cfg, Store(cfg.dir)
+    return cfg, Store.from_config(cfg)
 
 
 def warn(message: str) -> None:
@@ -104,6 +104,7 @@ def log_line(store: Store, message: str) -> None:
 @dataclass
 class SyncResult:
     pulled: int = 0
+    adopted: int = 0
     transcribed: int = 0
     too_long: list[tuple[str, float]] = field(default_factory=list)
     too_large: list[str] = field(default_factory=list)
@@ -111,6 +112,8 @@ class SyncResult:
 
     def summary(self) -> str:
         parts = [f"pulled={self.pulled}", f"transcribed={self.transcribed}"]
+        if self.adopted:
+            parts.append(f"adopted={self.adopted}")
         if self.pull_error:
             parts.append(f"pull-error={self.pull_error!r}")
         if self.too_long:
@@ -153,6 +156,13 @@ def run_sync(
             )
         if not quiet and result.pulled:
             click.echo(f"pulled {result.pulled} new {_plural(result.pulled, 'file')}")
+
+    # The journal may already hold memos another machine transcribed: adopt
+    # them before deciding what is left to transcribe here.
+    for transcript in journal.adopt(store):
+        result.adopted += 1
+        if not quiet:
+            click.echo(f"adopted {transcript.name} from journal")
 
     pending = store.untranscribed()
     if not pending:
@@ -254,7 +264,7 @@ def _sync_auto(*, no_pull: bool, max_minutes: float | None) -> None:
     store: Store | None = None
     try:
         cfg = load_config()
-        store = Store(cfg.dir)
+        store = Store.from_config(cfg)
     except Exception:  # noqa: BLE001 - config may be broken; fall back to no log
         pass
 
@@ -477,26 +487,31 @@ def _ls_line(transcript: Transcript, width: int) -> str:
 @click.option("--dir", "open_dir", is_flag=True, help="Open the memo directory instead.")
 @handle_errors
 def open_command(open_dir: bool) -> None:
-    """Open today's journal (or the memo directory) in $EDITOR."""
+    """Open today's journal (or the memo directory) in $EDITOR or Obsidian."""
     _cfg, store = context()
-    if open_dir:
-        target = store.root
-    else:
-        today = store.journal_path(datetime.now().strftime("%Y-%m-%d"))
-        journals = store.journal_files()
-        if today.exists():
-            target = today
-        elif journals:
-            target = journals[-1]
-            warn(f"no journal for today; opening {target.name}")
-        else:
-            raise click.ClickException(f"no journals in {store.root}")
+    target = store.root if open_dir else _journal_to_open(store)
     if not target.exists():
         raise click.ClickException(f"{target} does not exist")
+
+    # A journal inside a vault belongs to Obsidian, not to $EDITOR.
+    if not open_dir and obsidian.vault_root(store.journal_dir) is not None:
+        subprocess.run(["open", obsidian.uri(target)], check=False)
+        return
 
     editor = os.environ.get("EDITOR")
     command = [editor, str(target)] if editor else ["open", str(target)]
     subprocess.run(command, check=False)
+
+
+def _journal_to_open(store: Store) -> Path:
+    today = store.journal_path(datetime.now().strftime("%Y-%m-%d"))
+    if today.exists():
+        return today
+    journals = store.journal_files()
+    if not journals:
+        raise click.ClickException(f"no journals in {store.journal_dir}")
+    warn(f"no journal for today; opening {journals[-1].name}")
+    return journals[-1]
 
 
 # ----------------------------------------------------------------- rebuild
@@ -508,6 +523,8 @@ def rebuild() -> None:
     """Regenerate every journal file from the transcripts."""
     _cfg, store = context()
     journal.ensure_claude_md(store)
+    for transcript in journal.adopt(store):
+        click.echo(f"adopted {transcript.name} from journal")
     written = journal.rebuild(store)
     count = len(store.transcripts())
     click.echo(
@@ -570,6 +587,9 @@ def status() -> None:
 
     click.echo(f"config      {cfg.source or '(defaults)'}")
     click.echo(f"dir         {store.root}{'' if store.root.is_dir() else '  (missing)'}")
+    click.echo(f"journal dir {store.journal_dir}{'' if store.journal_dir.is_dir() else '  (missing)'}")
+    if (vault := obsidian.vault_root(store.journal_dir)) is not None:
+        click.echo(f"vault       {vault}")
     click.echo(f"model       {cfg.model}")
     click.echo(f"language    {cfg.language or 'auto'}")
     click.echo(f"remote dirs {', '.join(cfg.remote_dirs)}")

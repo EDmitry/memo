@@ -61,6 +61,51 @@ Transcripts are the durable record and the journal is a rendered view of them:
 `memo rebuild` regenerates every day file, and deleting a transcript makes the
 next `memo sync` transcribe that memo again.
 
+## Journals in an Obsidian vault
+
+Point `journal_dir` at a folder inside your vault and the daily journals become
+vault notes. Only the `YYYY-MM-DD.md` files move; audio, transcripts and
+`CLAUDE.md` stay in the memo directory.
+
+```toml
+journal_dir = "~/Vault/Memos"
+journal_template = "~/.config/memo/journal.md"
+```
+
+`journal_template` is the head memo writes when it creates a day's file —
+`{{date}}`, `{{time}}` and `{{title}}` are filled in, anything else is left
+alone:
+
+```
+---
+created: {{date}} {{time}}
+modified: {{date}} {{time}}
+subjects:
+---
+# {{title}}
+
+```
+
+memo owns only the entries: everything above the first `## HH:MM · M:SS`
+heading is yours, and `memo rebuild` copies it through untouched, so a
+`modified:` field your plugins maintain survives. Run `memo rebuild` once to
+render every existing transcript into the new location; the old journals left
+behind in the memo directory can then be deleted. `memo open` hands the note to
+Obsidian instead of `$EDITOR` when the journal folder is inside a vault.
+
+### Two machines, one recorder
+
+If the vault syncs between two Macs (iCloud, Obsidian Sync, git), both can use
+the same TP-7. Each machine keeps its own memo directory, and every entry
+carries the memo's identity as a hidden Obsidian block id
+(`^memo-2026-09-12-170312-000`), so `memo sync` on the second machine adopts
+the entries the first one wrote instead of transcribing the same recording
+again — `memo show` and `memo ls` then agree on both machines. The one gap is
+sync lag: a memo can still be transcribed twice if both machines sync it before
+the journal reaches the other one. Editing an entry in Obsidian sticks on the
+machines that adopted it; `memo rebuild` re-renders entries from local
+transcripts, so it reverts hand edits to memos that machine transcribed itself.
+
 ## Automatic sync on plug-in
 
 ```sh
@@ -87,6 +132,8 @@ environment variable overrides it (`MEMO_DIR`, `MEMO_MODEL`, …):
 
 ```toml
 dir = "~/Memos"
+journal_dir = "~/Memos"                  # where the daily journals go; defaults to dir
+journal_template = ""                    # heads a journal memo creates; see below
 model = "mlx-community/whisper-large-v3-turbo"
 language = ""                            # "" = auto-detect
 remote_dirs = ["/recordings", "/memo"]   # missing ones are skipped silently

@@ -114,3 +114,53 @@ def test_status(populated):
     assert "3 audio" not in result.output  # transcripts exist, audio does not
     assert "0 audio, 3 transcribed" in result.output
     assert "last sync   never" in result.output
+
+
+# ------------------------------------------------------ journals in a vault
+
+
+@pytest.fixture
+def opened(monkeypatch):
+    """Record what `memo open` shells out to."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr("memo.cli.subprocess.run", lambda command, **kwargs: calls.append(command))
+    monkeypatch.delenv("EDITOR", raising=False)
+    return calls
+
+
+def test_open_hands_a_journal_in_a_vault_to_obsidian(populated, vault, opened):
+    run("rebuild")
+    note = vault / "Memos" / "2026-09-12.md"
+    assert note.exists()
+
+    result = run("open")
+    assert result.exit_code == 0, result.output
+    assert opened == [["open", "obsidian://open?path=" + str(note).replace("/", "%2F")]]
+    assert "%20" not in opened[0][1] or " " not in str(note)  # the path is URL-encoded
+
+
+def test_open_outside_a_vault_uses_the_editor(populated, opened, monkeypatch):
+    run("rebuild")
+    monkeypatch.setenv("EDITOR", "vi")
+    result = run("open")
+    assert result.exit_code == 0, result.output
+    assert opened == [["vi", str(populated.journal_path("2026-09-12"))]]
+
+
+def test_open_dir_still_opens_the_memo_dir(populated, vault, opened):
+    run("rebuild")
+    assert run("open", "--dir").exit_code == 0
+    assert opened == [["open", str(populated.root)]]
+
+
+def test_status_shows_the_journal_dir_and_vault(populated, vault):
+    result = run("status")
+    assert result.exit_code == 0
+    assert f"journal dir {vault / 'Memos'}" in result.output
+    assert f"vault       {vault}" in result.output
+
+
+def test_status_without_a_vault_shows_no_vault_line(populated):
+    result = run("status")
+    assert f"journal dir {populated.root}" in result.output
+    assert "vault  " not in result.output
