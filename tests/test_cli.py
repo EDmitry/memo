@@ -5,6 +5,7 @@ from datetime import datetime
 import pytest
 from click.testing import CliRunner
 
+from memo import journal
 from memo.cli import cli, parse_since
 from memo.store import Store
 
@@ -36,7 +37,8 @@ def test_parse_since_rejects_junk(value):
 
 
 @pytest.fixture
-def populated(isolated_env) -> Store:
+def transcribed(isolated_env) -> Store:
+    """Three transcripts, no journals yet."""
     store = Store(isolated_env / "memos")
     store.ensure_dirs()
     for name, text in [
@@ -46,6 +48,13 @@ def populated(isolated_env) -> Store:
     ]:
         store.write_transcript(make_transcript(name, text))
     return store
+
+
+@pytest.fixture
+def populated(transcribed) -> Store:
+    """…and the journals that hold them, which is what `show` and `ls` read."""
+    journal.append_missing(transcribed)
+    return transcribed
 
 
 def run(*args):
@@ -80,13 +89,38 @@ def test_show_bad_since_is_a_usage_error(populated):
 def test_show_json(populated):
     import json
 
-    result = run("show", "--all", "--json")
-    payload = json.loads(result.output)
+    payload = json.loads(run("show", "--all", "--json").output)
     assert [item["name"] for item in payload] == [
         "2026-09-11_083000_000",
         "2026-09-12_170312_000",
         "2026-09-12_174501_001",
     ]
+    assert payload[2] == {
+        "date": "2026-09-12",
+        "time": "17:45",
+        "duration_s": 42.0,
+        "text": "Buy oat milk.",
+        "name": "2026-09-12_174501_001",
+    }
+
+
+def test_show_reads_the_journal_not_the_transcripts(populated):
+    """Both machines see the same thing: whatever the journal says."""
+    path = populated.journal_path("2026-09-12")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("Buy oat milk.", "Buy oat milk and bread."),
+        encoding="utf-8",
+    )
+    assert "Buy oat milk and bread." in run("show", "--all").output
+    assert "Buy oat milk and bread." in run("ls").output
+
+
+def test_show_needs_no_transcripts_at_all(populated):
+    """A second machine has the journals and none of the JSON."""
+    import shutil
+
+    shutil.rmtree(populated.transcripts_dir)
+    assert len(run("ls").output.strip().splitlines()) == 3
 
 
 def test_show_empty(store):
@@ -99,12 +133,41 @@ def test_ls(populated):
     assert lines[0].startswith("2026-09-11 08:30   0:42  Older thought")
 
 
-def test_rebuild(populated):
+def test_rebuild_appends_what_the_journals_are_missing(transcribed):
     result = run("rebuild")
     assert result.exit_code == 0
-    assert "rebuilt 2 days from 3 transcripts" in result.output
-    assert populated.journal_path("2026-09-12").exists()
-    assert populated.claude_md.exists()
+    assert "appended 3 memos to the journals" in result.output
+    assert transcribed.journal_path("2026-09-12").exists()
+    assert transcribed.claude_md.exists()
+    assert transcribed.ledger_names() == {item.name for item in transcribed.transcripts()}
+
+
+def test_rebuild_leaves_a_complete_journal_alone(populated):
+    before = {path: path.read_text(encoding="utf-8") for path in populated.journal_files()}
+    result = run("rebuild")
+    assert result.exit_code == 0
+    assert "nothing missing from the journals" in result.output
+    assert {path: path.read_text(encoding="utf-8") for path in populated.journal_files()} == before
+
+
+def test_rebuild_keeps_hand_edits_and_re_adds_only_the_deleted_entry(populated):
+    path = populated.journal_path("2026-09-12")
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        .replace("Refactor the transcription pipeline tomorrow.", "Refactor the pipeline.")
+        .replace("  - 2026-09-12_174501_001\n", "")
+        .replace("\n## 17:45 · 0:42\n\nBuy oat milk.\n", ""),
+        encoding="utf-8",
+    )
+
+    result = run("rebuild")
+    assert result.exit_code == 0
+    assert "appended 1 memo to the journals" in result.output
+
+    content = path.read_text(encoding="utf-8")
+    assert "Refactor the pipeline." in content  # the hand edit survives
+    assert "Refactor the transcription pipeline tomorrow." not in content
+    assert content.count("Buy oat milk.") == 1
 
 
 def test_status(populated):

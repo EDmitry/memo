@@ -1,8 +1,9 @@
 """The memo directory: audio files, transcripts, and the metadata under ``.memo/``.
 
-The filesystem is the state. A memo is *pulled* when its audio file exists and
-*transcribed* when its transcript JSON exists; everything is keyed by the audio
-file stem.
+The filesystem is the state. A memo is *pulled* when its audio file exists,
+*transcribed* when its transcript JSON exists, and *processed* when a journal
+lists it in the ``memos:`` ledger of :mod:`memo.ledger` — the last of those is
+the one another machine can see. Everything is keyed by the audio file stem.
 """
 
 from __future__ import annotations
@@ -13,8 +14,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from . import ledger
 from .config import Config
-from .obsidian import block_id
 
 AUDIO_SUFFIXES = (".wav", ".WAV")
 
@@ -24,7 +25,7 @@ NAME_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})(\d{2})(?:_(\d+))?
 
 @dataclass
 class Transcript:
-    """The durable record for one memo; the journal is a rendered view of these."""
+    """One transcription, as this machine stored it after Whisper ran."""
 
     name: str
     recorded_at: datetime
@@ -34,8 +35,6 @@ class Transcript:
     text: str
     segments: list[dict] = field(default_factory=list)
     transcribed_at: datetime = field(default_factory=datetime.now)
-    #: True when reconstructed from a shared journal entry another machine wrote.
-    adopted: bool = False
 
     @property
     def date(self) -> str:
@@ -51,7 +50,7 @@ class Transcript:
         return f"{total // 60}:{total % 60:02d}"
 
     def to_dict(self) -> dict:
-        data = {
+        return {
             "name": self.name,
             "recorded_at": self.recorded_at.isoformat(timespec="seconds"),
             "duration_s": round(self.duration_s, 3),
@@ -61,9 +60,6 @@ class Transcript:
             "segments": self.segments,
             "transcribed_at": self.transcribed_at.isoformat(timespec="seconds"),
         }
-        if self.adopted:
-            data["adopted"] = True
-        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "Transcript":
@@ -76,16 +72,16 @@ class Transcript:
             text=str(data.get("text") or "").strip(),
             segments=list(data.get("segments") or []),
             transcribed_at=_parse_dt(data.get("transcribed_at")),
-            adopted=bool(data.get("adopted")),
         )
 
 
 class Store:
     """Paths and lookups for one memo directory.
 
-    The durable data (audio, transcripts, sync state, ``CLAUDE.md``) always
-    lives under ``root``. Only the rendered journals can be sent elsewhere,
-    via ``journal_dir`` — typically a folder inside an Obsidian vault.
+    Audio, transcripts, sync state and ``CLAUDE.md`` always live under
+    ``root``. Only the journals can be sent elsewhere, via ``journal_dir`` —
+    typically a folder inside an Obsidian vault, possibly shared with another
+    machine.
     """
 
     def __init__(
@@ -148,21 +144,21 @@ class Store:
         return sorted(files, key=lambda path: (recorded_at_for(path), path.name))
 
     def untranscribed(self) -> list[Path]:
-        """Audio files that have no transcript yet, oldest first.
+        """Audio nobody has dealt with yet, oldest first.
 
-        Matched by block id rather than by file name: a transcript adopted
-        from the shared journal before this machine had the recording is
-        named after the block id, and must still count as transcribed.
+        A recording is done with once a journal lists it — that is what the
+        other machine can see — or once this machine has its transcript, which
+        covers the moment between transcribing and appending the entry.
         """
-        known = self.transcript_ids()
-        return [path for path in self.audio_files() if block_id(path.stem) not in known]
+        done = self.ledger_names() | self.transcript_names()
+        return [path for path in self.audio_files() if path.stem not in done]
 
     # -- transcripts ------------------------------------------------------
-    def transcript_ids(self) -> set[str]:
-        """The block id of every memo this machine has a transcript for."""
+    def transcript_names(self) -> set[str]:
+        """The name of every memo this machine has a transcript for."""
         if not self.transcripts_dir.is_dir():
             return set()
-        return {block_id(path.stem) for path in self.transcripts_dir.glob("*.json")}
+        return {path.stem for path in self.transcripts_dir.glob("*.json")}
 
     def transcript_path(self, stem: str) -> Path:
         return self.transcripts_dir / f"{stem}.json"
@@ -206,6 +202,13 @@ class Store:
             for path in self.journal_dir.glob("*.md")
             if re.fullmatch(r"\d{4}-\d{2}-\d{2}", path.stem)
         )
+
+    def ledger_names(self) -> set[str]:
+        """Every recording the journals list — the memos already processed."""
+        names: set[str] = set()
+        for path in self.journal_files():
+            names.update(ledger.read(path.read_text(encoding="utf-8")))
+        return names
 
 
 def recorded_at_for(path: Path) -> datetime:

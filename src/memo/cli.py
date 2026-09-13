@@ -22,7 +22,8 @@ import click
 from . import journal, launchd, obsidian
 from .config import Config, ConfigError, load as load_config
 from .device import DeviceError, devices as list_devices, pull as pull_dir
-from .store import Store, Transcript
+from .journal import JournalEntry
+from .store import Store
 from .transcribe import TranscribeError, Transcriber
 
 APP_ERRORS = (ConfigError, DeviceError, TranscribeError, launchd.LaunchdError, OSError)
@@ -104,16 +105,16 @@ def log_line(store: Store, message: str) -> None:
 @dataclass
 class SyncResult:
     pulled: int = 0
-    adopted: int = 0
     transcribed: int = 0
+    appended: int = 0
     too_long: list[tuple[str, float]] = field(default_factory=list)
     too_large: list[str] = field(default_factory=list)
     pull_error: str | None = None
 
     def summary(self) -> str:
         parts = [f"pulled={self.pulled}", f"transcribed={self.transcribed}"]
-        if self.adopted:
-            parts.append(f"adopted={self.adopted}")
+        if self.appended:
+            parts.append(f"appended={self.appended}")
         if self.pull_error:
             parts.append(f"pull-error={self.pull_error!r}")
         if self.too_long:
@@ -157,38 +158,38 @@ def run_sync(
         if not quiet and result.pulled:
             click.echo(f"pulled {result.pulled} new {_plural(result.pulled, 'file')}")
 
-    # The journal may already hold memos another machine transcribed: adopt
-    # them before deciding what is left to transcribe here.
-    for transcript in journal.adopt(store):
-        result.adopted += 1
-        if not quiet:
-            click.echo(f"adopted {transcript.name} from journal")
-
+    # Audio no journal lists yet: a recording the ledger already names was
+    # dealt with here, or on the other machine sharing this journal folder.
     pending = store.untranscribed()
     if not pending:
         if not quiet:
             click.echo("nothing new to transcribe")
-        return result
-
-    transcriber = Transcriber(cfg.model, cfg.language)
-    cap = max_minutes * 60 if max_minutes > 0 else 0.0
-
-    for path in pending:
-        duration = transcriber.duration(path)
-        if cap and duration > cap:
-            result.too_long.append((path.name, duration))
+    else:
+        transcriber = Transcriber(cfg.model, cfg.language)
+        cap = max_minutes * 60 if max_minutes > 0 else 0.0
+        for path in pending:
+            duration = transcriber.duration(path)
+            if cap and duration > cap:
+                result.too_long.append((path.name, duration))
+                if not quiet:
+                    click.echo(f"skipped {path.name} ({_clock(duration)}, over --max-minutes)")
+                continue
             if not quiet:
-                click.echo(f"skipped {path.name} ({_clock(duration)}, over --max-minutes)")
-            continue
+                warn(f"transcribing {path.name} ({_clock(duration)})…")
+            transcript = transcriber.transcribe(path, duration_s=duration)
+            store.write_transcript(transcript)
+            # Entry and ledger item per memo, so a crash mid-run loses nothing.
+            journal.append_entry(store, transcript)
+            result.transcribed += 1
+            if not quiet:
+                click.echo(_ls_line(transcript, _width()))
+
+    # Whatever this machine transcribed but never got into a journal: a crash
+    # between the two, or a day file since deleted by hand.
+    for transcript in journal.append_missing(store):
+        result.appended += 1
         if not quiet:
-            warn(f"transcribing {path.name} ({_clock(duration)})…")
-        transcript = transcriber.transcribe(path, duration_s=duration)
-        store.write_transcript(transcript)
-        # Append per memo, so a crash mid-run loses nothing.
-        journal.append_entry(store, transcript)
-        result.transcribed += 1
-        if not quiet:
-            click.echo(_ls_line(transcript, _width()))
+            click.echo(f"appended {transcript.name} to the journal")
 
     return result
 
@@ -391,7 +392,7 @@ def _sync_lock(store: Store):
 @click.option("--today", is_flag=True, help="Show today's memos.")
 @click.option("--since", "since", metavar="WHEN", help="3d, 2w, 12h, or an ISO date.")
 @click.option("--all", "show_all", is_flag=True, help="Show everything.")
-@click.option("--json", "as_json", is_flag=True, help="Print transcripts as JSON.")
+@click.option("--json", "as_json", is_flag=True, help="Print the entries as JSON.")
 @handle_errors
 def show(
     count: int | None,
@@ -406,52 +407,52 @@ def show(
         raise click.UsageError("use only one of -n, --today, --since, --all")
 
     _cfg, store = context()
-    transcripts = _select(store.transcripts(), count, today, since, show_all)
+    entries = _select(journal.journal_entries(store), count, today, since, show_all)
 
     if as_json:
-        click.echo(jsonlib.dumps([item.to_dict() for item in transcripts], ensure_ascii=False, indent=2))
+        click.echo(jsonlib.dumps([item.to_dict() for item in entries], ensure_ascii=False, indent=2))
         return
 
-    if not transcripts:
+    if not entries:
         click.echo("no memos")
         return
 
     width = _width()
     day = None
-    for index, transcript in enumerate(transcripts):
-        if transcript.date != day:
+    for index, item in enumerate(entries):
+        if item.date != day:
             if index:
                 click.echo()
-            day = transcript.date
+            day = item.date
             click.echo(click.style(day, bold=True))
             click.echo()
-        head = click.style(transcript.time, fg="cyan") + "  " + click.style(transcript.duration, dim=True)
+        head = click.style(item.time, fg="cyan") + "  " + click.style(item.duration, dim=True)
         click.echo("  " + head)
-        for line in _wrap(transcript.text or "(no speech detected)", width - 2):
+        for line in _wrap(item.text or "(no speech detected)", width - 2):
             click.echo("  " + line)
         click.echo()
 
 
 def _select(
-    transcripts: list[Transcript],
+    entries: list[JournalEntry],
     count: int | None,
     today: bool,
     since: str | None,
     show_all: bool,
-) -> list[Transcript]:
+) -> list[JournalEntry]:
     if show_all:
-        return transcripts
+        return entries
     if today:
         stamp = datetime.now().strftime("%Y-%m-%d")
-        return [item for item in transcripts if item.date == stamp]
+        return [item for item in entries if item.date == stamp]
     if since is not None:
         try:
             cutoff = parse_since(since)
         except ValueError as error:
             raise click.UsageError(str(error)) from error
-        return [item for item in transcripts if item.recorded_at >= cutoff]
+        return [item for item in entries if item.when >= cutoff]
     limit = DEFAULT_SHOW_COUNT if count is None else count
-    return transcripts[-limit:] if limit > 0 else []
+    return entries[-limit:] if limit > 0 else []
 
 
 # ---------------------------------------------------------------------- ls
@@ -462,18 +463,19 @@ def _select(
 def ls_command() -> None:
     """One line per memo: date, time, duration, first words."""
     _cfg, store = context()
-    transcripts = store.transcripts()
-    if not transcripts:
+    entries = journal.journal_entries(store)
+    if not entries:
         click.echo("no memos")
         return
     width = _width()
-    for transcript in transcripts:
-        click.echo(_ls_line(transcript, width))
+    for item in entries:
+        click.echo(_ls_line(item, width))
 
 
-def _ls_line(transcript: Transcript, width: int) -> str:
-    prefix = f"{transcript.date} {transcript.time}  {transcript.duration:>5}  "
-    text = " ".join(transcript.text.split()) or "(no speech detected)"
+def _ls_line(item, width: int) -> str:
+    """One memo on one line; anything with date, time, duration and text does."""
+    prefix = f"{item.date} {item.time}  {item.duration:>5}  "
+    text = " ".join(item.text.split()) or "(no speech detected)"
     room = max(20, width - len(prefix))
     if len(text) > room:
         text = text[: room - 1].rstrip() + "…"
@@ -520,17 +522,17 @@ def _journal_to_open(store: Store) -> Path:
 @click.command()
 @handle_errors
 def rebuild() -> None:
-    """Regenerate every journal file from the transcripts."""
+    """Add any transcript missing from the journals."""
     _cfg, store = context()
     journal.ensure_claude_md(store)
-    for transcript in journal.adopt(store):
-        click.echo(f"adopted {transcript.name} from journal")
-    written = journal.rebuild(store)
-    count = len(store.transcripts())
-    click.echo(
-        f"rebuilt {len(written)} {_plural(len(written), 'day')} from "
-        f"{count} {_plural(count, 'transcript')}"
-    )
+    appended = journal.append_missing(store)
+    width = _width()
+    for transcript in appended:
+        click.echo(_ls_line(transcript, width))
+    if not appended:
+        click.echo("nothing missing from the journals")
+        return
+    click.echo(f"appended {len(appended)} {_plural(len(appended), 'memo')} to the journals")
 
 
 # ------------------------------------------------------- install/uninstall

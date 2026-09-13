@@ -72,9 +72,12 @@ def test_sync_pulls_transcribes_and_writes_the_journal(synced):
     assert FakeTranscriber.calls == ["2026-09-12_170312_000", "2026-09-12_174501_001"]
     assert len(synced.transcripts()) == 2
 
-    journal = synced.journal_path("2026-09-12").read_text(encoding="utf-8")
-    assert journal.startswith("# 2026-09-12\n\n## 17:03 · 0:42\n")
-    assert "transcript of 2026-09-12_174501_001" in journal
+    day = synced.journal_path("2026-09-12").read_text(encoding="utf-8")
+    assert day.startswith(
+        "---\nmemos:\n  - 2026-09-12_170312_000\n  - 2026-09-12_174501_001\n---\n"
+        "# 2026-09-12\n\n## 17:03 · 0:42\n"
+    )
+    assert "transcript of 2026-09-12_174501_001" in day
 
     assert synced.claude_md.exists()
     assert synced.last_sync.exists()
@@ -92,6 +95,20 @@ def test_sync_is_idempotent(synced):
     assert FakeTranscriber.calls == []
     assert "nothing new to transcribe" in result.output
     assert len(synced.transcripts()) == 2
+
+
+def test_sync_appends_a_transcript_the_journal_is_missing(synced):
+    """A crash between transcribing and appending, or a day file deleted."""
+    run()
+    day = synced.journal_path("2026-09-12")
+    day.unlink()
+    FakeTranscriber.calls = []
+
+    result = run("--no-pull")
+    assert result.exit_code == 0, result.output
+    assert FakeTranscriber.calls == []  # the transcripts are still here
+    assert "appended 2026-09-12_170312_000 to the journal" in result.output
+    assert sorted(_ledger(day)) == ["2026-09-12_170312_000", "2026-09-12_174501_001"]
 
 
 def test_sync_never_imports_mlx(synced):
@@ -121,6 +138,12 @@ def test_sync_without_a_device_is_not_an_error(synced, monkeypatch):
     assert result.exit_code == 0
     assert result.output.strip() == "no TP-7 connected"
     assert synced.transcripts() == []
+
+
+def _ledger(path):
+    from memo import ledger
+
+    return ledger.read(path.read_text(encoding="utf-8"))
 
 
 def test_no_pull_transcribes_local_audio_without_the_device(synced, monkeypatch, remote):
@@ -302,19 +325,17 @@ def test_sync_into_a_shared_journal_never_duplicates_a_memo(synced, shared, isol
     assert len(FakeTranscriber.calls) == 2
     after_a = day.read_text(encoding="utf-8")
 
-    # Machine B has its own dir and the same recorder, but shares the journal.
+    # Machine B has its own (empty) dir and the same recorder, but shares the
+    # journal folder: the ledger tells it both memos are already written up.
     second = machine(isolated_env, monkeypatch, "machine-b")
     FakeTranscriber.calls = []
     result = run()
     assert result.exit_code == 0, result.output
-    assert FakeTranscriber.calls == []  # nothing to transcribe: the journal knew
-    assert "adopted 2026-09-12_170312_000 from journal" in result.output
-    assert day.read_text(encoding="utf-8") == after_a
-    assert {item.name for item in second.transcripts()} == {
-        "2026-09-12_170312_000",
-        "2026-09-12_174501_001",
-    }
-    assert all(item.adopted for item in second.transcripts())
+    assert FakeTranscriber.calls == []
+    assert "nothing new to transcribe" in result.output
+    assert day.read_text(encoding="utf-8") == after_a  # byte for byte
+    assert second.transcripts() == []  # B holds no copy of A's text
+    assert len(second.audio_files()) == 2  # but it did pull the audio as a backup
     assert len(CliRunner().invoke(cli, ["ls"]).output.strip().splitlines()) == 2
 
     # B records a new memo and syncs it.
@@ -325,22 +346,66 @@ def test_sync_into_a_shared_journal_never_duplicates_a_memo(synced, shared, isol
     assert run().exit_code == 0
     assert FakeTranscriber.calls == ["2026-09-12_200000_002"]
 
-    # A syncs again: it adopts B's memo instead of transcribing it twice.
+    # A syncs again: B's memo is in the ledger, so A leaves it alone.
     machine(isolated_env, monkeypatch, "machine-a")
     FakeTranscriber.calls = []
     result = run()
     assert result.exit_code == 0, result.output
     assert FakeTranscriber.calls == []
-    assert "adopted 2026-09-12_200000_002 from journal" in result.output
 
     content = day.read_text(encoding="utf-8")
-    assert content.count("^memo-") == 3
+    assert _ledger(day) == [
+        "2026-09-12_170312_000",
+        "2026-09-12_174501_001",
+        "2026-09-12_200000_002",
+    ]
     assert content.count("## 17:03 · 0:42") == 1
-    assert len(first.transcripts()) == 3
+    assert len(first.transcripts()) == 2  # A only ever transcribed its own two
 
-    # And a rebuild on A changes nothing.
+    # And a rebuild on either machine changes nothing.
     assert CliRunner().invoke(cli, ["rebuild"]).exit_code == 0
     assert day.read_text(encoding="utf-8") == content
+
+
+def test_a_hand_edit_in_the_shared_journal_is_permanent(synced, shared, isolated_env, monkeypatch):
+    machine(isolated_env, monkeypatch, "machine-a")
+    assert run().exit_code == 0
+    day = shared / "2026-09-12.md"
+    day.write_text(
+        day.read_text(encoding="utf-8").replace(
+            "transcript of 2026-09-12_170312_000", "What I actually said."
+        ),
+        encoding="utf-8",
+    )
+
+    assert run("--no-pull").exit_code == 0
+    assert CliRunner().invoke(cli, ["rebuild"]).exit_code == 0
+    assert "What I actually said." in day.read_text(encoding="utf-8")
+    assert "transcript of 2026-09-12_170312_000" not in day.read_text(encoding="utf-8")
+
+
+def test_re_transcribing_one_memo_takes_deleting_its_entry_and_its_ledger_line(
+    synced, shared, isolated_env, monkeypatch
+):
+    machine(isolated_env, monkeypatch, "machine-a")
+    assert run().exit_code == 0
+    day = shared / "2026-09-12.md"
+    name = "2026-09-12_170312_000"
+
+    text = day.read_text(encoding="utf-8")
+    day.write_text(
+        text.replace(f"  - {name}\n", "").replace(
+            f"## 17:03 · 0:42\n\ntranscript of {name}\n\n", ""
+        ),
+        encoding="utf-8",
+    )
+    Store.from_config(load_config()).transcript_path(name).unlink()
+
+    FakeTranscriber.calls = []
+    assert run("--no-pull").exit_code == 0
+    assert FakeTranscriber.calls == [name]
+    assert _ledger(day).count(name) == 1
+    assert day.read_text(encoding="utf-8").count("## 17:03 · 0:42") == 1
 
 
 def test_no_pull_writes_into_the_journal_dir(synced, shared, remote, monkeypatch):
@@ -354,7 +419,7 @@ def test_no_pull_writes_into_the_journal_dir(synced, shared, remote, monkeypatch
     assert result.exit_code == 0, result.output
     assert not (synced.root / "2026-09-12.md").exists()
     assert (shared / "2026-09-12.md").read_text(encoding="utf-8") == (
-        "# 2026-09-12\n\n## 17:03 · 0:42\n\n"
-        "transcript of 2026-09-12_170312_000 ^memo-2026-09-12-170312-000\n"
+        "---\nmemos:\n  - 2026-09-12_170312_000\n---\n"
+        "# 2026-09-12\n\n## 17:03 · 0:42\n\ntranscript of 2026-09-12_170312_000\n"
     )
     assert synced.claude_md.exists()  # CLAUDE.md never leaves the memo dir

@@ -57,9 +57,23 @@ The memo directory (`~/Memos` by default) is plain files:
   CLAUDE.md                                     written once, so `cd ~/Memos && claude` has context
 ```
 
-Transcripts are the durable record and the journal is a rendered view of them:
-`memo rebuild` regenerates every day file, and deleting a transcript makes the
-next `memo sync` transcribe that memo again.
+A day file is the record, and memo only ever appends to it:
+
+```markdown
+---
+memos:
+  - 2026-09-12_170312_000
+---
+# 2026-09-12
+
+## 17:03 · 0:42
+
+Remember to refactor the transcription pipeline tomorrow.
+```
+
+The `memos:` property lists the recordings the file already holds — that is how
+memo knows what is left to do. `memo show` and `memo ls` read these files, so
+anything you fix by hand is what you get back.
 
 ## Journals in an Obsidian vault
 
@@ -86,25 +100,33 @@ subjects:
 
 ```
 
-memo owns only the entries: everything above the first `## HH:MM · M:SS`
-heading is yours, and `memo rebuild` copies it through untouched, so a
-`modified:` field your plugins maintain survives. Run `memo rebuild` once to
-render every existing transcript into the new location; the old journals left
-behind in the memo directory can then be deleted. `memo open` hands the note to
-Obsidian instead of `$EDITOR` when the journal folder is inside a vault.
+memo adds its `memos:` list to that frontmatter and appends one entry per memo
+at the end of the file. It never rewrites anything else, so a fix you type into
+an entry is permanent and a `modified:` field your plugins maintain survives.
+Obsidian shows `memos` in the note's properties panel like any other property —
+hide it under Settings → Editor → Properties in document if you would rather
+not see it.
+
+Run `memo rebuild` once after moving `journal_dir`: it appends every transcript
+the journals do not list yet, which is also all it ever does. The old journals
+left behind in the memo directory can then be deleted. `memo open` hands the
+note to Obsidian instead of `$EDITOR` when the journal folder is inside a vault.
+
+To re-transcribe a memo you are unhappy with, take it out of the record: delete
+its entry, delete its line from `memos:`, delete
+`.memo/transcripts/<name>.json`, then run `memo sync --no-pull`. The fresh
+entry is appended at the end of the day file.
 
 ### Two machines, one recorder
 
 If the vault syncs between two Macs (iCloud, Obsidian Sync, git), both can use
-the same TP-7. Each machine keeps its own memo directory, and every entry
-carries the memo's identity as a hidden Obsidian block id
-(`^memo-2026-09-12-170312-000`), so `memo sync` on the second machine adopts
-the entries the first one wrote instead of transcribing the same recording
-again — `memo show` and `memo ls` then agree on both machines. The one gap is
-sync lag: a memo can still be transcribed twice if both machines sync it before
-the journal reaches the other one. Editing an entry in Obsidian sticks on the
-machines that adopted it; `memo rebuild` re-renders entries from local
-transcripts, so it reverts hand edits to memos that machine transcribed itself.
+the same TP-7. Each machine keeps its own memo directory, and the `memos:`
+ledger in the shared journals is what stops the second machine transcribing a
+recording the first one already wrote up. It still pulls the audio, so the
+second copy is a backup, and since `memo show` and `memo ls` read the journals,
+both machines print the same memos — edits included. The one gap is sync lag: a
+memo can still be transcribed twice if both machines sync it before the journal
+reaches the other one, which leaves a duplicated entry to delete.
 
 ## Automatic sync on plug-in
 
@@ -151,7 +173,9 @@ cd ~/Memos && claude       # CLAUDE.md explains the layout
 ```
 
 Output is plain text when stdout is not a terminal, so piping is safe.
-`memo show --json` gives the transcripts with segments and timestamps.
+`memo show --json` gives each entry as `{date, time, duration_s, text, name}`
+straight from the journals; the per-word segments stay in the transcript JSON
+under `.memo/transcripts/`.
 
 ## Development
 

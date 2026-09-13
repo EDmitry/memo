@@ -45,6 +45,31 @@ def test_orders_audio_and_finds_untranscribed(store):
     assert [path.stem for path in store.untranscribed()] == ["2026-09-12_174501_001"]
 
 
+def test_untranscribed_honours_the_ledger(store):
+    """A recording another machine already wrote up is not ours to transcribe."""
+    write_wav(store.audio_dir / "2026-09-12_170312_000.wav")
+    write_wav(store.audio_dir / "2026-09-12_174501_001.wav")
+    store.journal_path("2026-09-12").write_text(
+        "---\nmemos:\n  - 2026-09-12_170312_000\n---\n# 2026-09-12\n", encoding="utf-8"
+    )
+
+    assert store.ledger_names() == {"2026-09-12_170312_000"}
+    assert [path.stem for path in store.untranscribed()] == ["2026-09-12_174501_001"]
+
+
+def test_ledger_names_span_every_day_file(store):
+    store.journal_path("2026-09-11").write_text(
+        "---\nmemos: [2026-09-11_083000_000]\n---\n", encoding="utf-8"
+    )
+    store.journal_path("2026-09-12").write_text(
+        "---\nmemos:\n  - 2026-09-12_170312_000\n---\n", encoding="utf-8"
+    )
+    (store.journal_dir / "not-a-journal.md").write_text(
+        "---\nmemos:\n  - ignored\n---\n", encoding="utf-8"
+    )
+    assert store.ledger_names() == {"2026-09-11_083000_000", "2026-09-12_170312_000"}
+
+
 def test_transcript_round_trip(store):
     original = Transcript(
         name="2026-09-12_170312_000",

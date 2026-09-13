@@ -1,72 +1,62 @@
 from __future__ import annotations
 
-from memo import journal
+import pytest
+
+from memo import journal, ledger
 
 from conftest import make_transcript
 
+DAY = """\
+---
+memos:
+  - 2026-09-12_170312_000
+  - 2026-09-12_174501_001
+---
+# 2026-09-12
 
-def test_entry_format():
+## 17:03 · 0:42
+
+First thought.
+
+## 17:45 · 1:05
+
+Second thought.
+"""
+
+
+def test_entry_is_a_heading_and_a_paragraph():
     transcript = make_transcript("2026-09-12_170312_000", "Refactor the pipeline.", 42)
-    assert journal.entry(transcript) == (
-        "## 17:03 · 0:42\n\nRefactor the pipeline. ^memo-2026-09-12-170312-000\n"
-    )
+    assert journal.entry(transcript) == "## 17:03 · 0:42\n\nRefactor the pipeline.\n"
 
 
 def test_entry_collapses_whitespace():
     transcript = make_transcript("2026-09-12_170312_000", "  one\n two   three\n", 65)
-    assert journal.entry(transcript) == (
-        "## 17:03 · 1:05\n\none two three ^memo-2026-09-12-170312-000\n"
-    )
+    assert journal.entry(transcript) == "## 17:03 · 1:05\n\none two three\n"
 
 
-def test_append_matches_render(store):
+def test_append_writes_the_entry_and_the_ledger_item(store):
     first = make_transcript("2026-09-12_170312_000", "First thought.", 42)
     second = make_transcript("2026-09-12_174501_001", "Second thought.", 65)
 
     journal.append_entry(store, first)
     path = journal.append_entry(store, second)
 
-    expected = journal.render_day("2026-09-12", [first, second])
-    assert path.read_text(encoding="utf-8") == expected
-    assert expected == (
-        "# 2026-09-12\n\n"
-        "## 17:03 · 0:42\n\nFirst thought. ^memo-2026-09-12-170312-000\n\n"
-        "## 17:45 · 1:05\n\nSecond thought. ^memo-2026-09-12-174501-001\n"
-    )
+    assert path.read_text(encoding="utf-8") == DAY
+    assert store.ledger_names() == {"2026-09-12_170312_000", "2026-09-12_174501_001"}
 
 
-def test_rebuild_is_idempotent_and_matches_append(store):
-    transcripts = [
-        make_transcript("2026-09-12_170312_000", "First thought.", 42),
-        make_transcript("2026-09-12_174501_001", "Second thought.", 65),
-        make_transcript("2026-09-13_090000_000", "Next day.", 10),
-    ]
-    for transcript in transcripts:
-        store.write_transcript(transcript)
-        journal.append_entry(store, transcript)
+def test_append_leaves_everything_above_it_alone(store):
+    """An Obsidian plugin owns `modified:`; a hand edit owns the text it fixed."""
+    path = store.journal_path("2026-09-12")
+    path.write_text(DAY.replace("First thought.", "Fixed by hand."), encoding="utf-8")
 
-    appended = {path.name: path.read_text(encoding="utf-8") for path in store.journal_files()}
+    third = make_transcript("2026-09-12_190000_002", "Third thought.", 10)
+    journal.append_entry(store, third)
 
-    written = journal.rebuild(store)
-    assert [path.name for path in written] == ["2026-09-12.md", "2026-09-13.md"]
-    rebuilt = {path.name: path.read_text(encoding="utf-8") for path in written}
-    assert rebuilt == appended
-
-    journal.rebuild(store)
-    assert {path.name: path.read_text(encoding="utf-8") for path in store.journal_files()} == rebuilt
-
-
-def test_rebuild_repairs_damaged_entries(store):
-    transcript = make_transcript("2026-09-12_170312_000", "Only thought.", 42)
-    store.write_transcript(transcript)
-    store.journal_path("2026-09-12").write_text(
-        "# 2026-09-12\n\n## 17:03 · 0:42\n\ngarbage\n", encoding="utf-8"
-    )
-
-    journal.rebuild(store)
-    assert store.journal_path("2026-09-12").read_text(encoding="utf-8") == journal.render_day(
-        "2026-09-12", [transcript]
-    )
+    content = path.read_text(encoding="utf-8")
+    assert "Fixed by hand." in content
+    assert content.endswith("## 19:00 · 0:10\n\nThird thought.\n")
+    assert ledger.read(content)[-1] == "2026-09-12_190000_002"
 
 
 def test_claude_md_written_once(store):
@@ -76,64 +66,54 @@ def test_claude_md_written_once(store):
     assert store.claude_md.read_text(encoding="utf-8") == "edited by hand\n"
 
 
-# ------------------------------------------------- journal_dir and templates
-
-FRONTMATTER_HEAD = """\
----
-created: 2026-09-12 09:00
-modified: 2026-09-12 19:30
-subjects:
-  - walking
----
-# 2026-09-12
-
-A line I typed myself.
-
-"""
+# ------------------------------------------------------------ append_missing
 
 
-def test_rebuild_keeps_the_head_byte_for_byte(store):
-    """An Obsidian plugin owns `modified:`; memo owns only the entries."""
+def test_append_missing_adds_only_what_no_journal_lists(store):
     first = make_transcript("2026-09-12_170312_000", "First thought.", 42)
     second = make_transcript("2026-09-12_174501_001", "Second thought.", 65)
-    for transcript in (first, second):
-        store.write_transcript(transcript)
-    path = store.journal_path("2026-09-12")
-    path.write_text(FRONTMATTER_HEAD + journal.entry(first) + "\nstale junk\n", encoding="utf-8")
+    store.write_transcript(first)
+    store.write_transcript(second)
+    journal.append_entry(store, first)
 
-    journal.rebuild(store)
+    assert [item.name for item in journal.append_missing(store)] == [second.name]
+    assert store.journal_path("2026-09-12").read_text(encoding="utf-8") == DAY
+    assert journal.append_missing(store) == []
+
+
+def test_append_missing_never_rewrites_an_existing_entry(store):
+    for name, text in [("2026-09-12_170312_000", "First thought."), ("2026-09-12_174501_001", "Second thought.")]:
+        store.write_transcript(make_transcript(name, text, 42 if name.endswith("000") else 65))
+    path = store.journal_path("2026-09-12")
+    edited = DAY.replace("First thought.", "First thought, fixed by hand.").replace(
+        "  - 2026-09-12_174501_001\n", ""
+    ).replace("\n## 17:45 · 1:05\n\nSecond thought.\n", "")
+    path.write_text(edited, encoding="utf-8")
+
+    journal.append_missing(store)
 
     content = path.read_text(encoding="utf-8")
-    assert content == FRONTMATTER_HEAD + journal.render_entries([first, second])
-    assert content.startswith(FRONTMATTER_HEAD)
-    assert "stale junk" not in content
+    assert "First thought, fixed by hand." in content
+    assert content.count("## 17:45 · 1:05") == 1  # re-added exactly once
+    assert journal.append_missing(store) == []
 
 
-def test_rebuild_is_idempotent_over_a_head(store):
+def test_append_missing_recreates_a_day_file_deleted_by_hand(store):
     transcript = make_transcript("2026-09-12_170312_000", "First thought.", 42)
     store.write_transcript(transcript)
-    path = store.journal_path("2026-09-12")
-    path.write_text(FRONTMATTER_HEAD, encoding="utf-8")
+    journal.append_entry(store, transcript)
+    store.journal_path("2026-09-12").unlink()
 
-    journal.rebuild(store)
-    once = path.read_text(encoding="utf-8")
-    journal.rebuild(store)
-    assert path.read_text(encoding="utf-8") == once
-
-
-def test_rebuild_drops_the_entry_of_a_deleted_transcript(store):
-    first = make_transcript("2026-09-12_170312_000", "First thought.", 42)
-    second = make_transcript("2026-09-12_174501_001", "Second thought.", 65)
-    for transcript in (first, second):
-        store.write_transcript(transcript)
-        journal.append_entry(store, transcript)
-
-    store.transcript_path(second.name).unlink()
-    journal.rebuild(store)
-
-    assert store.journal_path("2026-09-12").read_text(encoding="utf-8") == journal.render_day(
-        "2026-09-12", [first]
+    assert [item.name for item in journal.append_missing(store)] == [transcript.name]
+    assert store.journal_path("2026-09-12").read_text(encoding="utf-8") == (
+        "---\nmemos:\n  - 2026-09-12_170312_000\n---\n"
+        "# 2026-09-12\n\n## 17:03 · 0:42\n\nFirst thought.\n"
     )
+
+
+# ------------------------------------------------- journal_dir and templates
+
+TEMPLATE = "---\ncreated: {{date}} {{time}}\nmodified: {{date}} {{time}}\nsubjects:\n---\n# {{title}}\n\n"
 
 
 def test_render_template():
@@ -158,38 +138,32 @@ def test_render_template_leaves_unknown_placeholders_alone():
     assert rendered == "2026-09-12 {{unknown}} 2026-09-12 {{}}"
 
 
-def test_append_uses_the_template_for_a_new_file(isolated_env, monkeypatch):
+def test_a_new_file_gets_the_template_with_the_ledger_in_its_frontmatter(
+    isolated_env, monkeypatch
+):
     from memo.config import load as load_config
     from memo.store import Store
 
     template = isolated_env / "journal.md"
-    template.write_text(
-        "---\ncreated: {{date}} {{time}}\nsubjects:\n---\n# {{title}}\n\n", encoding="utf-8"
-    )
+    template.write_text(TEMPLATE, encoding="utf-8")
     monkeypatch.setenv("MEMO_JOURNAL_TEMPLATE", str(template))
     store = Store.from_config(load_config())
     store.ensure_dirs()
 
-    transcript = make_transcript("2026-09-12_170312_000", "First thought.", 42)
-    path = journal.append_entry(store, transcript)
+    path = journal.append_entry(store, make_transcript("2026-09-12_170312_000", "First thought.", 42))
     assert path.read_text(encoding="utf-8") == (
-        "---\ncreated: 2026-09-12 17:03\nsubjects:\n---\n# 2026-09-12\n\n"
-        "## 17:03 · 0:42\n\nFirst thought. ^memo-2026-09-12-170312-000\n"
+        "---\ncreated: 2026-09-12 17:03\nmodified: 2026-09-12 17:03\nsubjects:\n"
+        "memos:\n  - 2026-09-12_170312_000\n---\n"
+        "# 2026-09-12\n\n## 17:03 · 0:42\n\nFirst thought.\n"
     )
 
-    # A second memo lands under the same head, and a rebuild agrees.
-    second = make_transcript("2026-09-12_174501_001", "Second thought.", 65)
-    journal.append_entry(store, second)
-    appended = path.read_text(encoding="utf-8")
-    store.write_transcript(transcript)
-    store.write_transcript(second)
-    journal.rebuild(store)
-    assert path.read_text(encoding="utf-8") == appended
+    journal.append_entry(store, make_transcript("2026-09-12_174501_001", "Second thought.", 65))
+    content = path.read_text(encoding="utf-8")
+    assert "created: 2026-09-12 17:03" in content
+    assert ledger.read(content) == ["2026-09-12_170312_000", "2026-09-12_174501_001"]
 
 
 def test_a_missing_template_is_a_config_error(isolated_env, monkeypatch):
-    import pytest
-
     from memo.config import ConfigError, load as load_config
     from memo.store import Store
 
@@ -200,18 +174,17 @@ def test_a_missing_template_is_a_config_error(isolated_env, monkeypatch):
         journal.append_entry(store, make_transcript("2026-09-12_170312_000", "x", 1))
 
 
-def test_journals_are_written_to_the_journal_dir(vault, isolated_env, monkeypatch):
+def test_journals_are_written_to_the_journal_dir(vault, isolated_env):
     from memo.config import load as load_config
     from memo.store import Store
 
     store = Store.from_config(load_config())
     store.ensure_dirs()
-    transcript = make_transcript("2026-09-12_170312_000", "In the vault.", 42)
-    path = journal.append_entry(store, transcript)
+    path = journal.append_entry(store, make_transcript("2026-09-12_170312_000", "In the vault.", 42))
 
     assert path == vault / "Memos" / "2026-09-12.md"
     assert not (store.root / "2026-09-12.md").exists()
-    assert path.read_text(encoding="utf-8") == journal.render_day("2026-09-12", [transcript])
+    assert ledger.read(path.read_text(encoding="utf-8")) == ["2026-09-12_170312_000"]
 
 
 def test_claude_md_points_at_the_journal_dir(vault, isolated_env):
@@ -225,25 +198,16 @@ def test_claude_md_points_at_the_journal_dir(vault, isolated_env):
     assert store.claude_md.parent == store.root
 
 
-# ------------------------------------------------------- the shared journal
+# ------------------------------------------------------- reading them back
 
 
-def test_entries_carry_a_block_id_the_parser_recovers(store):
-    transcript = make_transcript("2026-09-12_170312_000", "First thought.", 65)
-    text = journal.render_day("2026-09-12", [transcript])
-
-    (item,) = journal.parse_day(text, "2026-09-12")
-    assert item.block_id == "memo-2026-09-12-170312-000"
-    assert (item.time, item.duration_s, item.text) == ("17:03", 65.0, "First thought.")
-    assert item.as_transcript("2026-09-12_170312_000").adopted is True
-
-
-def test_an_adopted_entry_renders_back_to_itself(store):
-    transcript = make_transcript("2026-09-12_170312_000", "First thought.", 65)
-    rendered = journal.entry(transcript)
-
-    (item,) = journal.parse_day(rendered, "2026-09-12")
-    assert journal.entry(item.as_transcript(transcript.name)) == rendered
+def test_parse_day_reads_headings_and_text():
+    entries = journal.parse_day(DAY, "2026-09-12")
+    assert [(item.time, item.duration_s, item.text) for item in entries] == [
+        ("17:03", 42.0, "First thought."),
+        ("17:45", 65.0, "Second thought."),
+    ]
+    assert [item.name for item in entries] == [None, None]  # named from the ledger, not here
 
 
 def test_the_parser_tolerates_hand_edits_and_other_sections():
@@ -252,77 +216,45 @@ def test_the_parser_tolerates_hand_edits_and_other_sections():
         "# 2026-09-12\n\nA paragraph of my own.\n\n"
         "##   17:03  ·  0:42\n\n"
         "   Text I   fixed by hand.  \n\n"
-        "^memo-2026-09-12-170312-000\n\n"
-        "## 17:45 · 1:05\n\nNo block id here.\n\n"
+        "## 17:45 · 1:05\n\nSecond.\n\n"
         "## Other notes\n\nNot a memo.\n"
     )
     first, second = journal.parse_day(text, "2026-09-12")
     assert (first.time, first.text) == ("17:03", "Text I fixed by hand.")
-    assert first.block_id == "memo-2026-09-12-170312-000"
-    assert (second.time, second.duration_s, second.text) == ("17:45", 65.0, "No block id here.")
-    assert second.block_id is None  # older entries simply do not dedupe
+    assert (second.time, second.duration_s, second.text) == ("17:45", 65.0, "Second.")
 
 
-def test_adoption_reconstructs_a_transcript_for_another_machines_entry(store):
-    theirs = make_transcript("2026-09-12_170312_000", "Their thought.", 42)
-    store.journal_path("2026-09-12").write_text(
-        journal.render_day("2026-09-12", [theirs]), encoding="utf-8"
-    )
-
-    (adopted,) = journal.adopt(store)
-    assert adopted.name == "2026-09-12-170312-000"  # no local audio: from the block id
-    assert adopted.adopted is True
-    assert store.read_transcript(adopted.name).text == "Their thought."
-
-    # Idempotent, and a rebuild reproduces the file byte for byte.
-    before = store.journal_path("2026-09-12").read_text(encoding="utf-8")
-    assert journal.adopt(store) == []
-    journal.rebuild(store)
-    assert store.journal_path("2026-09-12").read_text(encoding="utf-8") == before
-
-
-def test_adoption_names_the_memo_after_local_audio_when_it_has_it(store):
-    from conftest import write_wav
-
-    write_wav(store.audio_dir / "2026-09-12_170312_000.wav")
-    theirs = make_transcript("2026-09-12_170312_000", "Their thought.", 42)
-    store.journal_path("2026-09-12").write_text(
-        journal.render_day("2026-09-12", [theirs]), encoding="utf-8"
-    )
-
-    (adopted,) = journal.adopt(store)
-    assert adopted.name == "2026-09-12_170312_000"
-    assert store.untranscribed() == []  # so the audio is never transcribed again
-
-
-def test_adoption_keeps_a_hand_edit_but_rebuild_reverts_our_own(store):
-    """The journal wins for adopted entries; our own transcripts win for ours."""
-    mine = make_transcript("2026-09-12_170312_000", "As transcribed.", 42)
-    theirs = make_transcript("2026-09-12_174501_001", "Theirs as transcribed.", 65)
-    store.write_transcript(mine)
-    path = store.journal_path("2026-09-12")
-    path.write_text(journal.render_day("2026-09-12", [mine, theirs]), encoding="utf-8")
-    journal.adopt(store)
-
-    path.write_text(
-        path.read_text(encoding="utf-8")
-        .replace("As transcribed.", "Fixed by hand.")
-        .replace("Theirs as transcribed.", "Theirs, fixed by hand."),
+def test_journal_entries_name_each_memo_from_the_ledger(store):
+    store.journal_path("2026-09-12").write_text(DAY, encoding="utf-8")
+    store.journal_path("2026-09-11").write_text(
+        "---\nmemos:\n  - 2026-09-11_083000_000\n---\n# 2026-09-11\n\n## 08:30 · 0:05\n\nYesterday.\n",
         encoding="utf-8",
     )
-    journal.adopt(store)
-    journal.rebuild(store)
 
-    content = path.read_text(encoding="utf-8")
-    assert "Theirs, fixed by hand." in content  # adopted: the journal is the record
-    assert "As transcribed." in content  # ours: re-rendered from our transcript
-    assert "Fixed by hand." not in content
+    entries = journal.journal_entries(store)
+    assert [(item.date, item.time, item.name) for item in entries] == [
+        ("2026-09-11", "08:30", "2026-09-11_083000_000"),
+        ("2026-09-12", "17:03", "2026-09-12_170312_000"),
+        ("2026-09-12", "17:45", "2026-09-12_174501_001"),
+    ]
 
 
-def test_parser_accepts_a_block_id_on_its_own_line():
-    """Entries written before the id was attached to the paragraph still parse."""
-    from memo.journal import parse_day
+def test_a_ledger_that_no_longer_lines_up_leaves_the_names_out(store):
+    """Entries are still readable; only the identity is dropped."""
+    store.journal_path("2026-09-12").write_text(
+        DAY.replace("  - 2026-09-12_170312_000\n", ""), encoding="utf-8"
+    )
+    entries = journal.journal_entries(store)
+    assert [item.text for item in entries] == ["First thought.", "Second thought."]
+    assert [item.name for item in entries] == [None, None]
 
-    legacy = "# 2026-09-12\n\n## 17:03 · 0:42\n\nFirst thought.\n\n^memo-2026-09-12-170312-000\n"
-    entries = parse_day(legacy, "2026-09-12")
-    assert [(e.block_id, e.text) for e in entries] == [("memo-2026-09-12-170312-000", "First thought.")]
+
+def test_entries_and_ledger_out_of_order_leave_the_names_out(store):
+    store.journal_path("2026-09-12").write_text(
+        DAY.replace(
+            "  - 2026-09-12_170312_000\n  - 2026-09-12_174501_001\n",
+            "  - 2026-09-12_174501_001\n  - 2026-09-12_170312_000\n",
+        ),
+        encoding="utf-8",
+    )
+    assert [item.name for item in journal.journal_entries(store)] == [None, None]

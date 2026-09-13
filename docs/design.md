@@ -13,24 +13,28 @@ access over MTP) and `mlx-whisper` (local transcription on Apple silicon).
    many arrived.
 4. `memo show` prints recent memos on one screen. `memo show --since 7d | claude -p ...`
    feeds them to an AI. The journal is plain Markdown, so Obsidian or any
-   editor can read it too.
+   editor can read it — and edit it: memo reads the journals back, so a
+   mishearing fixed there is fixed everywhere.
 
 ## Principles
 
 - **Filesystem is the state.** No database. A memo is "pulled" when its audio
-  file exists locally, and "transcribed" when its transcript JSON exists. Every
-  step is idempotent and re-runnable; deleting a transcript re-transcribes it.
+  file exists locally, "transcribed" when its transcript JSON exists, and
+  "processed" when a journal lists it. Every step is idempotent and
+  re-runnable.
 - **One MTP session per sync.** Each `tp7 -a ...` invocation performs the full
   MIDI switch → MTP → close lifecycle, which costs ~10 s and flips the device
   back to audio mode on close. `sync` therefore calls `tp7` exactly once:
   `tp7 -a pull <remote-dir> <audio-dir> --recursive --skip-existing --max-size ...`.
 - **The device layer stays in `tp7`.** Anything about USB, MTP, or the TP-7
   belongs in the Rust CLI. `memo` only shells out to `tp7 --json`.
-- **Transcripts are the local durable record; the journal is the shared one.**
-  `memo rebuild` regenerates a day's entries from transcript JSON. Every
-  rendered entry also carries the memo's identity as an Obsidian block id, so a
-  journal folder shared between machines is enough for either of them to adopt
-  entries it never transcribed itself.
+- **The journal is the shared record, and memo only appends to it.** A day
+  file's `memos:` frontmatter property is the ledger of the recordings it
+  holds; a recording is processed once some journal names it. Appending a memo
+  means one entry at the end of the file and one item at the end of that list —
+  nothing already written is rewritten or reordered, so a hand edit in Obsidian
+  is permanent and `modified:` survives. Transcripts are this machine's local
+  copy of the text, not a source the journal is re-rendered from.
 - **CLI conventions follow clig.dev** like `tp7`: concise human output,
   `--json` where useful, diagnostics on stderr, non-zero exit on failure.
 
@@ -38,7 +42,7 @@ access over MTP) and `mlx-whisper` (local transcription on Apple silicon).
 
 ```
 ~/Memos/                          # MEMO_DIR (config: dir)
-  2026-09-12.md                   # daily journal, one H2 per memo (see journal_dir)
+  2026-09-12.md                   # daily journal: a memos: ledger, one H2 per memo
   audio/2026-09-12_170312_000.wav # original pulled audio, never modified
   .memo/transcripts/2026-09-12_170312_000.json  # whisper output + metadata
   .memo/sync.log                  # append-only log of automatic runs
@@ -50,29 +54,50 @@ access over MTP) and `mlx-whisper` (local transcription on Apple silicon).
 an Obsidian vault, typically. Nothing else moves: audio, transcripts, sync
 state and `CLAUDE.md` always stay in `dir`.
 
-Journal entry:
+A day file:
 
 ```markdown
-## 17:03 · 0:42
+---
+created: 2026-09-12 13:17
+modified: 2026-09-12 13:17
+subjects:
+memos:
+  - 2026-09-12_131726_000
+  - 2026-09-12_131837_000
+---
+# 2026-09-12
 
-Remember to refactor the transcription pipeline tomorrow. ... ^memo-2026-09-12-170312-000
+## 13:17 · 0:42
+
+Remember to refactor the transcription pipeline tomorrow.
+
+## 13:18 · 1:05
+
+...
 ```
 
-The trailing block id is the memo's identity in the journal: the audio stem
-with every character outside `[A-Za-z0-9-]` replaced by `-`. Obsidian hides it
-in reading view and links to it as
-`[[2026-09-12#^memo-2026-09-12-170312-000]]`.
+`memos:` is the ledger: the audio stem of every entry below it, in the order
+the entries appear. Obsidian treats it as an ordinary list property and shows
+it in the note's properties panel — unless properties are hidden under
+Settings → Editor → Properties in document.
+
+`memo.ledger` reads and writes only that block: a line-based reader tolerant of
+what Obsidian and hands produce (`memos:` followed by indented `- item` lines,
+the inline `memos: [a, b]` form, quoted items), which creates the key just
+above the closing `---` when it is absent and a minimal frontmatter at the top
+when the file has none. Everything else in the file comes through byte for
+byte, which no YAML round-trip can promise.
 
 ## Journals in an Obsidian vault
 
 Set `journal_dir` to a folder inside the vault and the daily journals are vault
 notes like any other. Two rules keep that safe:
 
-- **memo owns the entries, not the file.** A journal file is a *head* —
+- **memo appends; the file is yours.** A journal file is a *head* —
   frontmatter, an H1, anything typed above the first entry — followed by the
-  entries. `append_entry` appends at EOF; `rebuild` replaces everything from
-  the first `## HH:MM · M:SS` heading to EOF and copies the head through byte
-  for byte, so a `modified:` field an Obsidian plugin maintains survives.
+  entries. memo adds an entry at EOF and a name to `memos:`, and touches
+  nothing else, ever. So a `modified:` field an Obsidian plugin maintains
+  survives, and so does a fix you typed into an entry.
 - **memo creates a day file the way the vault expects.** `journal_template`
   points at a file whose contents become the head of a new journal, with
   `{{date}}`, `{{time}}` and `{{title}}` filled in (unknown `{{...}}` are left
@@ -81,7 +106,12 @@ notes like any other. Two rules keep that safe:
 `memo open` hands the file to Obsidian (`open "obsidian://open?path=…"`) when
 `journal_dir` has a `.obsidian` directory in some ancestor, and falls back to
 `$EDITOR` otherwise. `memo rebuild` migrates an existing set of transcripts
-into the new location.
+into the new location: it appends every transcript no journal lists yet.
+
+To re-transcribe one memo: delete its entry, delete its line from `memos:`,
+delete `.memo/transcripts/<name>.json`, and run `memo sync --no-pull`. The new
+entry lands at the end of the day file (memo never inserts), which `memo show`
+and `memo ls` reorder by time anyway.
 
 ## Two machines, one vault
 
@@ -90,29 +120,31 @@ iCloud, Obsidian Sync or git. Each keeps its own `dir` — its own audio and its
 own transcripts — and only the `.md` files are assumed to sync, since hidden
 folders like `.memo/` may not.
 
-That is why identity lives in the journal. `memo sync` (after the pull, before
-transcription) and `memo rebuild` first *adopt*: every journal entry whose
-block id has no local transcript becomes one here, reconstructed from the
-entry — time and duration from the heading, text from the paragraph, named
-after the local audio file if this machine has it and after the block id
-otherwise, and marked `"adopted": true`. Transcription then finds nothing to
-do for those memos, so neither machine transcribes the other's recordings and
-`rebuild` on either regenerates the complete day. Audio is still pulled on both
-machines, which makes the second copy a backup.
+That is why the ledger lives in the journal. `Store.untranscribed()` is the
+audio whose name is in no journal's `memos:` list and has no local transcript,
+so the second machine transcribes only what nobody has transcribed yet; it
+still pulls every recording, which makes its copy a backup. `memo show` and
+`memo ls` read the journal files rather than the transcripts, so both machines
+print the same text — including the machine that never transcribed a word of
+it, and including your edits.
 
-An adopted transcript renders back to exactly the entry it came from, so
-adoption never rewrites the journal. The rule for hand edits follows from
-which record owns the entry: fixing a mishearing in Obsidian sticks on every
-machine that adopted it, and is reverted by `rebuild` on the machine that
-transcribed it. The remaining window is sync lag — a memo can still be
-transcribed twice if both machines sync it before the journal reaches the
-other one.
+Sync then needs one more step, and it is the whole of `memo rebuild`: append
+every local transcript no journal lists. That covers a crash between writing
+the transcript and appending the entry, and a day file deleted by hand. It can
+never disturb an entry that is already there.
+
+The remaining window is sync lag: a memo can still be transcribed twice if both
+machines sync it before the journal reaches the other one — which shows up as a
+duplicated entry, to be deleted by hand.
 
 The memo timestamp comes from the TP-7 filename (`YYYY-MM-DD_HHMMSS_NNN.wav`);
 the MTP modified date is the fallback. Duration comes from the WAV header.
 
 Transcript JSON: `{ "name", "recorded_at", "duration_s", "language", "model",
-"text", "segments": [{start, end, text}], "transcribed_at" }`.
+"text", "segments": [{start, end, text}], "transcribed_at" }`. `memo show
+--json` reports what the journal holds instead — `{ "date", "time",
+"duration_s", "text", "name" }`, where `name` comes from the ledger when the
+day's entries and its ledger line up, and is `null` when they no longer do.
 
 ## Commands
 
@@ -120,11 +152,11 @@ Transcript JSON: `{ "name", "recorded_at", "duration_s", "language", "model",
 memo sync            pull new memos from a connected TP-7, transcribe, append to journal
                      --auto      launchd mode: quiet, notifies on completion, waits for unplug
                      --no-pull   only transcribe audio already in audio/
-memo show            print recent memos, grouped by day, newest day last
+memo show            print recent memos (read from the journals), newest day last
                      -n N | --today | --since 3d|2026-09-01 | --all | --json
 memo ls              one line per memo: date, time, duration, first words
 memo open            open today's journal (or --dir); Obsidian when it lives in a vault
-memo rebuild         regenerate journal files from transcripts
+memo rebuild         add any transcript missing from the journals
 memo install         write the launchd agent that fires `memo sync --auto` on TP-7 plug-in
 memo uninstall       remove it
 memo status          config, model, memo dir, launchd agent state, last sync
